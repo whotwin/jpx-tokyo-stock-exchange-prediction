@@ -239,3 +239,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+demo_2.py
+demo_v2_impl.py
+explore_test_env.py
+TEST_ENVIRONMENT_README.md
+*.zip

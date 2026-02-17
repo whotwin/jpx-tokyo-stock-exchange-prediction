@@ -53,18 +53,15 @@ os.makedirs(PLOT_DIR, exist_ok=True)
 TEST_YEAR = 2021
 ROLL_TRAIN_YEARS = 2
 ROLL_RETRAIN_FREQ = "M"
-HORIZONS = [1, 5, 20]
+HORIZONS = [20]  # Only test 20-day horizon
 
-# Reduced data sources for speed
+# Only use stock+all (requires data beyond stock_prices)
 DATA_SOURCES = [
-    "stock_only",
     "stock+all",
 ]
 
-# Model types - only include available models
+# Only LGBM - LSTM removed
 MODELS = ["timeseries_lgbm_walkforward"]
-if TORCH_AVAILABLE:
-    MODELS.append("lstm_walkforward")
 
 # OPTIMIZED Deep learning hyperparameters
 SEQ_LENGTH = 10  # Reduced from 20
@@ -488,15 +485,17 @@ def evaluate_predictions(pred_df):
     }
 
 
-def evaluate_portfolio_from_predictions(pred_df, horizon=1):
+def evaluate_portfolio_from_predictions(pred_df):
     """
-    Evaluate portfolio performance with horizon-aware rebalance frequency.
+    Evaluate portfolio performance with 20-day locked portfolio.
+
+    Key features:
+    - Forced 20-day lock period - no early rebalancing
+    - Simple return accumulation (no compounding)
+    - Turnover calculated on position changes
 
     Args:
         pred_df: DataFrame with predictions
-        horizon: Forecast horizon in days (1, 5, 20). Adjusts rebalance frequency to avoid
-                 overlapping returns - for longer horizons, we rebalance less frequently
-                 to match the holding period.
     """
     if pred_df.empty:
         return {
@@ -504,21 +503,13 @@ def evaluate_portfolio_from_predictions(pred_df, horizon=1):
             "portfolio_max_drawdown": np.nan, "portfolio_avg_turnover": np.nan,
         }
 
-    # Adjust rebalance frequency based on horizon to avoid overlapping returns
-    # 1d: weekly (standard), 5d: bi-weekly, 20d: monthly
-    if horizon >= 20:
-        rebalance_freq = "M"  # Monthly for 20d horizon
-    elif horizon >= 5:
-        rebalance_freq = "2W-FRI"  # Bi-weekly for 5d horizon
-    else:
-        rebalance_freq = "W-FRI"  # Weekly for 1d horizon
-
     tmp = pred_df[["Date", "SecuritiesCode", "pred", "y_true"]].copy()
     tmp = tmp.rename(columns={"y_true": "Target"})
 
-    _, daily_perf, m = base.construct_rank_band_portfolio(
+    # Use 20-day locked portfolio - forced hold for 20 days, no early rebalancing
+    _, daily_perf, m = base.construct_20d_locked_portfolio(
         tmp, pred_col="pred", target_col="Target",
-        long_k=200, short_k=200, band=50, rebalance_freq=rebalance_freq,
+        long_k=200, short_k=200, lock_days=20,
         trading_cost_rate=base.TRADING_COST_RATE, slippage_rate=base.SLIPPAGE_RATE,
     )
 
@@ -656,7 +647,7 @@ def main():
 
                 # Evaluate
                 stat = evaluate_predictions(pred)
-                port = evaluate_portfolio_from_predictions(pred, horizon=h)
+                port = evaluate_portfolio_from_predictions(pred)
 
                 row = {"datasource": ds, "horizon": f"{h}d", "model_type": model_type}
                 row.update(stat)

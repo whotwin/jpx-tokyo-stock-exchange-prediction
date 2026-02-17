@@ -947,6 +947,205 @@ def construct_rank_band_portfolio(
     return daily_weights, daily_perf, metrics
 
 
+def construct_20d_locked_portfolio(
+    df,
+    pred_col="pred",
+    target_col="Target",
+    date_col="Date",
+    code_col="SecuritiesCode",
+    long_k=200,
+    short_k=200,
+    lock_days=20,
+    trading_cost_rate=TRADING_COST_RATE,
+    slippage_rate=SLIPPAGE_RATE,
+):
+    """
+    20-day locked portfolio - no rebalancing allowed before lock period ends.
+
+    Key differences from construct_rank_band_portfolio:
+    1. Forced 20-day lock period - cannot rebalance early
+    2. Simple return accumulation (no compounding)
+    3. Turnover is calculated as absolute position changes
+
+    Args:
+        df: DataFrame with predictions
+        pred_col: Prediction column name
+        target_col: Target column name
+        date_col: Date column name
+        code_col: Securities code column name
+        long_k: Number of long positions
+        short_k: Number of short positions
+        lock_days: Lock period in days (default 20)
+        trading_cost_rate: Trading cost rate
+        slippage_rate: Slippage rate
+    """
+    req = {date_col, code_col, pred_col, target_col}
+    miss = req - set(df.columns)
+    if miss:
+        raise ValueError(f"Missing required columns: {sorted(miss)}")
+
+    work = df[[date_col, code_col, pred_col, target_col]].copy()
+    work = work.dropna(subset=[date_col, code_col, pred_col, target_col])
+    work = work.sort_values([date_col, code_col]).reset_index(drop=True)
+    if work.empty:
+        empty_w = pd.DataFrame(columns=["Date", "SecuritiesCode", "weight"])
+        empty_p = pd.DataFrame(columns=["Date", "portfolio_return"])
+        metrics = {
+            "num_days": 0,
+            "total_return": 0.0,
+            "mean_daily_return": 0.0,
+            "std_daily_return": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown": 0.0,
+            "avg_turnover": 0.0,
+            "avg_gross_exposure": 0.0,
+            "avg_cost": 0.0,
+            "avg_long_count": 0.0,
+            "avg_short_count": 0.0,
+        }
+        return empty_w, empty_p, metrics
+
+    dates = pd.Series(sorted(work[date_col].unique()))
+    # Rebalance every lock_days
+    rebalance_flag = np.zeros(len(dates), dtype=bool)
+    rebalance_flag[0] = True
+    for i in range(lock_days, len(dates), lock_days):
+        rebalance_flag[i] = True
+
+    prev_w = pd.Series(dtype=float)
+    long_hold = set()
+    short_hold = set()
+
+    weight_rows = []
+    perf_rows = []
+
+    for i, d in enumerate(dates):
+        day = work[work[date_col] == d].copy()
+        if day.empty:
+            continue
+        day = day.sort_values(code_col).reset_index(drop=True)
+        universe = day[code_col].astype(int).tolist()
+        universe_set = set(universe)
+
+        long_hold = {c for c in long_hold if c in universe_set}
+        short_hold = {c for c in short_hold if c in universe_set}
+
+        # Only rebalance on lock period boundaries
+        if rebalance_flag[i]:
+            day_desc = day.sort_values(pred_col, ascending=False).reset_index(drop=True)
+            day_asc = day.sort_values(pred_col, ascending=True).reset_index(drop=True)
+
+            # Select top long_k and bottom short_k
+            long_entry = set(int(c) for c in day_desc[code_col].head(long_k).values)
+            short_entry = set(int(c) for c in day_asc[code_col].head(short_k).values)
+
+            long_hold = long_entry
+            short_hold = short_entry
+
+        # Build weights
+        w = pd.Series(0.0, index=universe, dtype=float)
+        if len(long_hold) > 0:
+            lw = 0.5 / len(long_hold)
+            for c in long_hold:
+                if c in w.index:
+                    w.loc[c] = lw
+        if len(short_hold) > 0:
+            sw = -0.5 / len(short_hold)
+            for c in short_hold:
+                if c in w.index:
+                    w.loc[c] = sw
+        w = w[w != 0]
+
+        # Calculate turnover
+        union_idx = prev_w.index.union(w.index) if len(prev_w) > 0 else w.index
+        prev_w_filled = prev_w.reindex(union_idx, fill_value=0.0) if len(prev_w) > 0 else pd.Series(0.0, index=union_idx)
+        turnover = float((w.reindex(union_idx, fill_value=0.0) - prev_w_filled).abs().sum())
+        gross = float(np.abs(w).sum())
+
+        # Calculate return
+        ret_map = day.set_index(day[code_col].astype(int))[target_col]
+        gross_ret = float((w * ret_map.reindex(w.index).to_numpy(dtype=float)).sum()) if len(w) > 0 else 0.0
+
+        # Costs
+        tc = float(turnover * trading_cost_rate)
+        sl = float(turnover * slippage_rate)
+        net = gross_ret - tc - sl
+
+        perf_rows.append(
+            {
+                "Date": d,
+                "gross_return": gross_ret,
+                "transaction_cost": tc,
+                "slippage_cost": sl,
+                "portfolio_return": net,
+                "turnover": turnover,
+                "gross_exposure": gross,
+                "net_exposure": float(w.sum()) if len(w) > 0 else 0.0,
+                "long_count": int(len(long_hold)),
+                "short_count": int(len(short_hold)),
+                "is_rebalance": int(rebalance_flag[i]),
+            }
+        )
+
+        if len(w) > 0:
+            weight_rows.append(
+                pd.DataFrame(
+                    {
+                        "Date": d,
+                        code_col: w.index,
+                        "weight": w.values,
+                    }
+                )
+            )
+
+        prev_w = w
+
+    daily_weights = pd.concat(weight_rows, ignore_index=True) if weight_rows else pd.DataFrame(columns=["Date", "SecuritiesCode", "weight"])
+    daily_perf = pd.DataFrame(perf_rows).sort_values("Date").reset_index(drop=True) if perf_rows else pd.DataFrame()
+
+    if daily_perf.empty:
+        metrics = {
+            "num_days": 0,
+            "total_return": 0.0,
+            "mean_daily_return": 0.0,
+            "std_daily_return": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown": 0.0,
+            "avg_turnover": 0.0,
+            "avg_gross_exposure": 0.0,
+            "avg_cost": 0.0,
+            "avg_long_count": 0.0,
+            "avg_short_count": 0.0,
+        }
+        return daily_weights, daily_perf, metrics
+
+    # Simple return accumulation (no compounding)
+    daily_perf["cumulative_return"] = daily_perf["portfolio_return"].cumsum()
+
+    # Calculate max drawdown for simple returns
+    roll_max = daily_perf["cumulative_return"].cummax()
+    daily_perf["drawdown"] = daily_perf["cumulative_return"] - roll_max
+
+    mu = float(daily_perf["portfolio_return"].mean())
+    sd = float(daily_perf["portfolio_return"].std())
+    sharpe = float(np.sqrt(252.0) * mu / sd) if sd > 0 else 0.0
+
+    metrics = {
+        "num_days": int(len(daily_perf)),
+        "total_return": float(daily_perf["cumulative_return"].iloc[-1]),
+        "mean_daily_return": mu,
+        "std_daily_return": sd,
+        "sharpe": sharpe,
+        "max_drawdown": float(daily_perf["drawdown"].min()),
+        "avg_turnover": float(daily_perf["turnover"].mean()),
+        "avg_gross_exposure": float(daily_perf["gross_exposure"].mean()),
+        "avg_cost": float((daily_perf["transaction_cost"] + daily_perf["slippage_cost"]).mean()),
+        "avg_long_count": float(daily_perf["long_count"].mean()),
+        "avg_short_count": float(daily_perf["short_count"].mean()),
+    }
+    return daily_weights, daily_perf, metrics
+
+
 # ============== Constrained Portfolio Functions ==============
 
 def neutralize_weights(weights, sectors, market_caps):
