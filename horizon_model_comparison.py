@@ -53,15 +53,18 @@ os.makedirs(PLOT_DIR, exist_ok=True)
 TEST_YEAR = 2021
 ROLL_TRAIN_YEARS = 2
 ROLL_RETRAIN_FREQ = "M"
-HORIZONS = [20]  # Only test 20-day horizon
+HORIZONS = [1, 5, 20]
 
-# Only use stock+all (requires data beyond stock_prices)
+# Data sources for comparison
 DATA_SOURCES = [
+    "stock_only",
     "stock+all",
 ]
 
-# Only LGBM - LSTM removed
+# Model types - only include available models
 MODELS = ["timeseries_lgbm_walkforward"]
+if TORCH_AVAILABLE:
+    MODELS.append("lstm_walkforward")
 
 # OPTIMIZED Deep learning hyperparameters
 SEQ_LENGTH = 10  # Reduced from 20
@@ -487,12 +490,7 @@ def evaluate_predictions(pred_df):
 
 def evaluate_portfolio_from_predictions(pred_df):
     """
-    Evaluate portfolio performance with 20-day locked portfolio.
-
-    Key features:
-    - Forced 20-day lock period - no early rebalancing
-    - Simple return accumulation (no compounding)
-    - Turnover calculated on position changes
+    Evaluate portfolio using rank-based band portfolio.
 
     Args:
         pred_df: DataFrame with predictions
@@ -506,10 +504,10 @@ def evaluate_portfolio_from_predictions(pred_df):
     tmp = pred_df[["Date", "SecuritiesCode", "pred", "y_true"]].copy()
     tmp = tmp.rename(columns={"y_true": "Target"})
 
-    # Use 20-day locked portfolio - forced hold for 20 days, no early rebalancing
-    _, daily_perf, m = base.construct_20d_locked_portfolio(
+    # Use original rank band portfolio with weekly rebalancing
+    _, daily_perf, m = base.construct_rank_band_portfolio(
         tmp, pred_col="pred", target_col="Target",
-        long_k=200, short_k=200, lock_days=20,
+        long_k=200, short_k=200, band=50, rebalance_freq="W-FRI",
         trading_cost_rate=base.TRADING_COST_RATE, slippage_rate=base.SLIPPAGE_RATE,
     )
 
