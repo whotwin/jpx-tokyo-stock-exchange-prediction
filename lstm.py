@@ -1,9 +1,10 @@
 """
-JPX Stock Prediction - LSTM Model with 20-Day Window
+JPX Stock Prediction - LSTM Model with Raw OHLCV Data
 
 Training Strategy:
-- Similar to train.py: Use all available data from 2017 onwards
-- Use 20-day historical window to predict 30-day forward returns
+- Use raw OHLCV data (no manual feature engineering)
+- Use 60-day historical window to predict 30-day forward returns
+- LSTM learns features automatically from raw price/volume data
 - Expanding window: train on past data, predict next year
 - 2017-2019 train -> predict 2020
 - 2017-2020 train -> predict 2021
@@ -34,13 +35,16 @@ PLOT_DIR = os.path.join(OUTPUT_DIR, "plots")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(PLOT_DIR, exist_ok=True)
 
-# Configuration - same as train.py
+# Raw OHLCV columns for LSTM input
+RAW_FEATURES = ["Open", "High", "Low", "Close", "Volume"]
+
+# Configuration
 TEST_YEAR = 2021
 ROLL_TRAIN_YEARS = 2
 TARGET_HORIZON = 30
 TOP_K = 200
 BOTTOM_K = 200
-SEQ_LENGTH = 20  # 20-day lookback window
+SEQ_LENGTH = 60  # 60-day lookback window with raw OHLCV data
 
 # Trading costs - same as train.py
 TRADING_COST_RATE = 0.0004
@@ -311,13 +315,45 @@ def load_all_data():
 
 
 def load_dataset():
-    """Load dataset - same as train.py."""
-    full_df, feature_cols = load_all_data()
-    target_col = "target_30d"
-    data = full_df[["Date", "SecuritiesCode"] + feature_cols + [target_col]].copy()
-    log(f"Features: {len(feature_cols)}")
-    log(f"Target: {target_col}")
-    return data, feature_cols, target_col
+    """
+    Load raw OHLCV data for LSTM.
+    Instead of manual feature engineering, LSTM will learn features from raw data.
+    """
+    log("Loading raw OHLCV data...")
+
+    # Load stock prices
+    stock_prices = pd.read_csv("train_files/stock_prices.csv")
+    stock_prices = to_num(stock_prices, ["Open", "High", "Low", "Close", "Volume"])
+    stock_prices["Date"] = pd.to_datetime(stock_prices["Date"])
+
+    # Keep only needed columns
+    df = stock_prices[["Date", "SecuritiesCode", "Open", "High", "Low", "Close", "Volume"]].copy()
+
+    # Sort by stock and date
+    df = df.sort_values(["SecuritiesCode", "Date"]).reset_index(drop=True)
+
+    # Fill missing values: forward fill then backward fill per stock
+    for col in RAW_FEATURES:
+        df[col] = df.groupby("SecuritiesCode")[col].ffill()
+        df[col] = df.groupby("SecuritiesCode")[col].bfill()
+        # If still NaN, fill with 0 (will be filtered out in sequence creation)
+        df[col] = df[col].fillna(0)
+
+    # Build 30-day forward return labels
+    df = build_30d_labels_raw(df)
+
+    log(f"Loaded: {len(df)} rows of raw OHLCV data")
+    log(f"Features: {RAW_FEATURES}")
+    log(f"Target: target_30d")
+
+    return df, RAW_FEATURES, "target_30d"
+
+
+def build_30d_labels_raw(df):
+    """Build 30-day forward return labels from raw Close prices."""
+    df = df.sort_values(["SecuritiesCode", "Date"]).reset_index(drop=True)
+    df["target_30d"] = df.groupby("SecuritiesCode")["Close"].shift(-30) / df["Close"] - 1.0
+    return df
 
 
 # ============== LSTM Model ==============
@@ -372,12 +408,14 @@ def normalize_features_per_stock(df, feature_cols):
     return df, norm_cols
 
 
-def create_sequences(df, feature_cols, seq_length=20, target_col="target_30d"):
+def create_sequences(df, feature_cols, seq_length=60, target_col="target_30d"):
     """
-    Create sequences for LSTM - each sample uses seq_length days of features
-    to predict the 30-day forward return.
+    Create sequences for LSTM from raw OHLCV data.
+    Each sample uses seq_length days of raw OHLCV data to predict 30-day forward return.
+
+    Input: (batch, seq_length, 5) - 5 raw features (Open, High, Low, Close, Volume)
     """
-    log(f"Creating sequences with seq_length={seq_length}...")
+    log(f"Creating sequences with seq_length={seq_length} from raw OHLCV data...")
 
     df = df.sort_values(["SecuritiesCode", "Date"]).reset_index(drop=True)
 
@@ -395,7 +433,7 @@ def create_sequences(df, feature_cols, seq_length=20, target_col="target_30d"):
         if len(stock_data) < seq_length + TARGET_HORIZON + 1:
             continue
 
-        # Get feature values
+        # Get raw feature values (OHLCV)
         feature_values = stock_data[feature_cols].values
         target_values = stock_data[target_col].values
         date_values = stock_data["Date"].values
@@ -422,6 +460,7 @@ def create_sequences(df, feature_cols, seq_length=20, target_col="target_30d"):
     codes_arr = np.array(codes)
 
     log(f"Created sequences: X={X.shape}, y={y.shape}")
+    log(f"Input shape: ({seq_length}, {len(feature_cols)}) = Open, High, Low, Close, Volume")
 
     return X, y, dates_arr, codes_arr
 
@@ -485,6 +524,76 @@ def predict_lstm(model, test_loader):
 
 
 # ============== Evaluation Functions (same as train.py) ==============
+
+# ============== Kaggle Official Evaluation ==============
+
+def calc_spread_return_sharpe(df: pd.DataFrame, portfolio_size: int = 200, toprank_weight_ratio: float = 2) -> float:
+    """
+    Kaggle official evaluation function.
+    Calculates the spread return Sharpe ratio.
+
+    Args:
+        df (pd.DataFrame): Must contain 'Date', 'Rank', 'Target' columns
+        portfolio_size (int): # of equities to buy/sell
+        toprank_weight_ratio (float): the relative weight of the most highly ranked stock compared to the least.
+    Returns:
+        (float): sharpe ratio
+    """
+    def _calc_spread_return_per_day(df, portfolio_size, toprank_weight_ratio):
+        """
+        Args:
+            df (pd.DataFrame): predicted results
+            portfolio_size (int): # of equities to buy/sell
+            toprank_weight_ratio (float): the relative weight of the most highly ranked stock compared to the least.
+        Returns:
+            (float): spread return
+        """
+        assert df['Rank'].min() == 0
+        assert df['Rank'].max() == len(df['Rank']) - 1
+        weights = np.linspace(start=toprank_weight_ratio, stop=1, num=portfolio_size)
+        purchase = (df.sort_values(by='Rank')['Target'][:portfolio_size] * weights).sum() / weights.mean()
+        short = (df.sort_values(by='Rank', ascending=False)['Target'][:portfolio_size] * weights).sum() / weights.mean()
+        return purchase - short
+
+    buf = df.groupby('Date').apply(_calc_spread_return_per_day, portfolio_size, toprank_weight_ratio)
+    sharpe_ratio = buf.mean() / buf.std()
+    return sharpe_ratio
+
+
+def prepare_for_kaggle_eval(pred_df):
+    """
+    Prepare prediction DataFrame for Kaggle official evaluation.
+    Adds 'Rank' column based on prediction values (higher pred = lower rank = better).
+    """
+    df = pred_df.copy()
+    df = df.sort_values(["Date", "pred"], ascending=[True, False]).reset_index(drop=True)
+
+    # Add Rank: 0 is best (highest prediction), higher is worse
+    df["Rank"] = df.groupby("Date").cumcount()
+
+    # Rename y_true to Target for Kaggle format
+    df = df.rename(columns={"y_true": "Target"})
+
+    return df
+
+
+def evaluate_portfolio_kaggle(pred_df, portfolio_size=200, toprank_weight_ratio=2):
+    """
+    Evaluate using Kaggle official method.
+    """
+    if pred_df.empty:
+        return {"kaggle_sharpe": np.nan}
+
+    # Prepare data with Rank column
+    df = prepare_for_kaggle_eval(pred_df)
+
+    # Calculate Kaggle Sharpe
+    sharpe = calc_spread_return_sharpe(df, portfolio_size=portfolio_size, toprank_weight_ratio=toprank_weight_ratio)
+
+    return {
+        "kaggle_sharpe": float(sharpe),
+    }
+
 
 def evaluate_portfolio(pred_df):
     """Evaluate portfolio performance - same as train.py."""
@@ -750,8 +859,9 @@ def main():
     start_time = time.time()
 
     log("=" * 60)
-    log("JPX 30-Day Horizon - LSTM Model")
+    log("JPX 30-Day Horizon - LSTM Model (Raw OHLCV Data)")
     log(f"Configuration: seq_length={SEQ_LENGTH}, horizon={TARGET_HORIZON}")
+    log(f"Input: 60-day window of OHLCV (5 features)")
     log("=" * 60)
 
     # Load data
@@ -773,6 +883,9 @@ def main():
     port_metrics = evaluate_portfolio(pred)
     pred_metrics = evaluate_predictions(pred)
 
+    # Kaggle official evaluation
+    kaggle_metrics = evaluate_portfolio_kaggle(pred, portfolio_size=200, toprank_weight_ratio=2)
+
     log("\n" + "=" * 40)
     log("PREDICTION METRICS")
     log("=" * 40)
@@ -788,6 +901,11 @@ def main():
     log(f"Sharpe: {port_metrics['sharpe']:.4f}")
     log(f"Hit Ratio: {port_metrics['hit_ratio']:.2%}")
 
+    log("\n" + "=" * 40)
+    log("KAGGLE OFFICIAL EVALUATION")
+    log("=" * 40)
+    log(f"Kaggle Sharpe: {kaggle_metrics['kaggle_sharpe']:.4f}")
+
     # Print monthly breakdown
     if "daily_df" in port_metrics and not port_metrics["daily_df"].empty:
         daily_df = port_metrics["daily_df"]
@@ -801,7 +919,7 @@ def main():
         log(f"\nPositive months: {positive_months}/{len(daily_df)}")
 
     # Save metrics
-    metrics = {**pred_metrics, **port_metrics}
+    metrics = {**pred_metrics, **port_metrics, **kaggle_metrics}
     metrics_df = pd.DataFrame([metrics])
     metrics_path = os.path.join(OUTPUT_DIR, "metrics.csv")
     metrics_df.to_csv(metrics_path, index=False)
