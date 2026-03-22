@@ -246,3 +246,4 @@ explore_test_env.py
 TEST_ENVIRONMENT_README.md
 *.zip
 nouse/
+cleaned_data/

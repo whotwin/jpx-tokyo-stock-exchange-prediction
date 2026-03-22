@@ -1,16 +1,32 @@
 """
-JPX Stock Prediction - LSTM Model with Raw OHLCV Data
+JPX Stock Prediction - LSTM Model with 41 Engineered Features
 
 Training Strategy:
-- Use raw OHLCV data (no manual feature engineering)
+- Use 41 engineered features (aligned with itransformer_model.py)
 - Use 60-day historical window to predict 30-day forward returns
-- LSTM learns features automatically from raw price/volume data
 - Expanding window: train on past data, predict next year
-- 2017-2019 train -> predict 2020
-- 2017-2020 train -> predict 2021
+  - Round 1: 2017 train -> predict 2018
+  - Round 2: 2017-2018 train -> predict 2019
+  - Round 3: 2017-2019 train -> predict 2020
+  - Round 4: 2017-2020 train -> predict 2021
+
+Features (41 total):
+- Returns (7): stk_ret_1/2/3/5/10/20, stk_logret_1
+- Volatility (3): stk_vol_5/10/20
+- Spreads (2): stk_hl_spread, stk_oc_spread
+- Volume (4): stk_volume_chg_1, stk_volume_to_ma_5/10/20
+- Rolling mean returns (3): stk_ret_mean_5/10/20
+- MA ratios (3): stk_close_to_ma_5/10/20
+- Distribution (1): stk_skew_20
+- Time (2): stk_dayofweek, stk_month
+- Company (2): stk_expected_dividend, stk_supervision_flag
+- Fundamentals (3): stk_mcap, stk_sector, stk_market_segment
+- Options (1): iv_avg
+- Trades (4): trd_individual/foreigners/securitiescos/investmenttrusts
+- Financials (6): fin_netsales/operatingprofit/ordinaryprofit/profit/totalassets/equity
 
 Model: LSTM with proper time-series handling
-Evaluation: Same as train.py (Sharpe, Spearman, Hit Ratio)
+Evaluation: Daily rebalancing with sqrt(252) Sharpe annualization
 """
 
 import os
@@ -35,7 +51,52 @@ PLOT_DIR = os.path.join(OUTPUT_DIR, "plots")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(PLOT_DIR, exist_ok=True)
 
-# Raw OHLCV columns for LSTM input
+# Feature columns for LSTM input - aligned with itransformer_model.py (41 features)
+USE_FEATURES = [
+    # 收益率特征（7个）
+    "stk_ret_1", "stk_ret_2", "stk_ret_3", "stk_ret_5", "stk_ret_10", "stk_ret_20",
+    "stk_logret_1",
+
+    # 波动率特征（3个）
+    "stk_vol_5", "stk_vol_10", "stk_vol_20",
+
+    # 价差特征（2个）
+    "stk_hl_spread", "stk_oc_spread",
+
+    # 成交量特征（4个）
+    "stk_volume_chg_1",
+    "stk_volume_to_ma_5", "stk_volume_to_ma_10", "stk_volume_to_ma_20",
+
+    # 滚动均值收益（3个）
+    "stk_ret_mean_5", "stk_ret_mean_10", "stk_ret_mean_20",
+
+    # 移动平均比率（3个）
+    "stk_close_to_ma_5", "stk_close_to_ma_10", "stk_close_to_ma_20",
+
+    # 分布特征（1个）
+    "stk_skew_20",
+
+    # 时间特征（2个）
+    "stk_dayofweek", "stk_month",
+
+    # 公司行为（2个）
+    "stk_expected_dividend", "stk_supervision_flag",
+
+    # 基本面特征（3个）
+    "stk_mcap", "stk_sector", "stk_market_segment",
+
+    # 期权特征（1个）
+    "iv_avg",
+
+    # 交易特征（4个）
+    "trd_individual", "trd_foreigners", "trd_securitiescos", "trd_investmenttrusts",
+
+    # 财务特征（6个）
+    "fin_netsales", "fin_operatingprofit", "fin_ordinaryprofit",
+    "fin_profit", "fin_totalassets", "fin_equity",
+]
+
+# Legacy OHLCV features (no longer used)
 RAW_FEATURES = ["Open", "High", "Low", "Close", "Volume"]
 
 # Configuration
@@ -44,7 +105,7 @@ ROLL_TRAIN_YEARS = 2
 TARGET_HORIZON = 30
 TOP_K = 200
 BOTTOM_K = 200
-SEQ_LENGTH = 60  # 60-day lookback window with raw OHLCV data
+SEQ_LENGTH = 90  # 60-day lookback window with raw OHLCV data
 
 # Trading costs - same as train.py
 TRADING_COST_RATE = 0.0004
@@ -54,9 +115,9 @@ SLIPPAGE_RATE = 0.0002
 LSTM_HIDDEN_SIZE = 64
 LSTM_NUM_LAYERS = 2
 LSTM_DROPOUT = 0.2
-LSTM_EPOCHS = 10
+LSTM_EPOCHS = 50
 LSTM_BATCH_SIZE = 1024
-LSTM_LEARNING_RATE = 0.001
+LSTM_LEARNING_RATE = 0.005
 
 
 def log(msg):
@@ -314,39 +375,124 @@ def load_all_data():
     return full_df, feature_cols
 
 
-def load_dataset():
+def load_all_data_for_lstm():
     """
-    Load raw OHLCV data for LSTM.
-    Instead of manual feature engineering, LSTM will learn features from raw data.
+    Load all data sources with advanced features for LSTM.
+
+    This function builds a comprehensive feature set including:
+    1. Price momentum features (returns at various horizons)
+    2. Intraday price structure features (spreads, MA ratios)
+    3. Volatility features (historical volatility)
+    4. Volume features (volume changes, volume ratios)
+    5. Cross-sectional features (rankings within each time step)
+    6. External features (trades, financials, options)
+
+    This is different from raw OHLCV data - LSTM learns from these engineered features.
     """
-    log("Loading raw OHLCV data...")
+    log("Loading data with advanced features for LSTM...")
 
-    # Load stock prices
-    stock_prices = pd.read_csv("train_files/stock_prices.csv")
-    stock_prices = to_num(stock_prices, ["Open", "High", "Low", "Close", "Volume"])
-    stock_prices["Date"] = pd.to_datetime(stock_prices["Date"])
+    # Load all data sources
+    sources = load_data_sources("train_files")
 
-    # Keep only needed columns
-    df = stock_prices[["Date", "SecuritiesCode", "Open", "High", "Low", "Close", "Volume"]].copy()
-
-    # Sort by stock and date
-    df = df.sort_values(["SecuritiesCode", "Date"]).reset_index(drop=True)
-
-    # Fill missing values: forward fill then backward fill per stock
-    for col in RAW_FEATURES:
-        df[col] = df.groupby("SecuritiesCode")[col].ffill()
-        df[col] = df.groupby("SecuritiesCode")[col].bfill()
-        # If still NaN, fill with 0 (will be filtered out in sequence creation)
-        df[col] = df[col].fillna(0)
+    # Build full feature table (same as load_all_data but keep all features)
+    log("Building full feature table with advanced features...")
+    full_df, feature_cols = build_feature_table(
+        sources=sources,
+        start_date="2017-01-04",
+        end_date="2021-12-03",
+    )
 
     # Build 30-day forward return labels
-    df = build_30d_labels_raw(df)
+    labels = build_30d_labels(sources["stock_prices"])
+    full_df = full_df.merge(labels, on=["Date", "SecuritiesCode"], how="left")
+    full_df = full_df.sort_values(["Date", "SecuritiesCode"]).reset_index(drop=True)
 
-    log(f"Loaded: {len(df)} rows of raw OHLCV data")
-    log(f"Features: {RAW_FEATURES}")
-    log(f"Target: target_30d")
+    # Add cross-sectional features (rank within each time step)
+    log("Adding cross-sectional features (rank within each time step)...")
+    full_df = add_cross_sectional_features(full_df)
 
-    return df, RAW_FEATURES, "target_30d"
+    log(f"Loaded: {len(full_df)} rows, {len(feature_cols)} features")
+
+    return full_df, feature_cols
+
+
+def add_cross_sectional_features(df):
+    """
+    Add cross-sectional features: rank within each time step.
+
+    For each time step (Date), compute the rank of each stock for key features.
+    This captures relative position within the market at each point in time.
+    """
+    # Key features for cross-sectional ranking
+    rank_features = ["stk_ret_1", "stk_vol_20", "stk_volume_chg_1"]
+
+    for feat in rank_features:
+        if feat in df.columns:
+            # Compute rank within each date (0-1 scale)
+            df[f"{feat}_rank"] = df.groupby("Date")[feat].rank(pct=True)
+            log(f"Added cross-sectional feature: {feat}_rank")
+
+    return df
+
+
+# Define advanced features for LSTM (similar to itransformer but optimized)
+LSTM_FEATURES = [
+    # 价格动量特征 (7)
+    "stk_ret_1", "stk_ret_2", "stk_ret_3", "stk_ret_5", "stk_ret_10", "stk_ret_20",
+    "stk_logret_1",
+
+    # 日内价格结构特征 (4)
+    "stk_hl_spread", "stk_oc_spread",
+    "stk_close_to_ma_5", "stk_close_to_ma_20",
+
+    # 波动率特征 (3)
+    "stk_vol_5", "stk_vol_10", "stk_vol_20",
+
+    # 成交量特征 (4)
+    "stk_volume_chg_1",
+    "stk_volume_to_ma_5", "stk_volume_to_ma_10", "stk_volume_to_ma_20",
+
+    # 横截面特征 (3)
+    "stk_ret_1_rank", "stk_vol_20_rank", "stk_volume_chg_1_rank",
+
+    # 期权特征 (1)
+    "iv_avg",
+
+    # 交易流向特征 (4)
+    "trd_individual", "trd_foreigners", "trd_securitiescos", "trd_investmenttrusts",
+
+    # 财务/市值特征 (3)
+    "stk_mcap", "stk_sector", "stk_market_segment",
+]
+
+
+def load_dataset():
+    """
+    Load data for LSTM with advanced features.
+    Uses comprehensive feature set including price momentum, volatility, volume, and cross-sectional features.
+    """
+    log("Loading data with advanced features for LSTM...")
+
+    # Load all data with advanced features (ignore feature_cols from this function)
+    full_df, _ = load_all_data_for_lstm()
+
+    # Filter to use only the specified features
+    available_features = [f for f in LSTM_FEATURES if f in full_df.columns]
+    missing_features = [f for f in LSTM_FEATURES if f not in full_df.columns]
+
+    if missing_features:
+        log(f"Warning: {len(missing_features)} features not found: {missing_features[:5]}...")
+
+    log(f"Using {len(available_features)} features out of {len(LSTM_FEATURES)} requested")
+
+    target_col = "target_30d"
+    data = full_df[["Date", "SecuritiesCode"] + available_features + [target_col]].copy()
+
+    log(f"Loaded: {len(data)} rows with {len(available_features)} advanced features")
+    log(f"Features: {available_features[:5]}... (and {len(available_features)-5} more)")
+    log(f"Target: {target_col}")
+
+    return data, available_features, target_col
 
 
 def build_30d_labels_raw(df):
@@ -408,6 +554,52 @@ def normalize_features_per_stock(df, feature_cols):
     return df, norm_cols
 
 
+def cross_sectional_normalize(df, feature_cols, eps=1e-8):
+    """
+    Cross-sectional normalization: normalize across stocks at each time step
+
+    For each time step (Date), normalize features across all stocks.
+    This removes market-wide effects and focuses on relative differences between stocks.
+
+    Args:
+        df: DataFrame with columns [Date, SecuritiesCode, features...]
+        feature_cols: list of feature column names to normalize
+        eps: small value to prevent division by zero
+
+    Returns:
+        df: DataFrame with normalized features (overwrites original columns)
+    """
+    log("Applying cross-sectional normalization across stocks at each time step...")
+
+    df = df.sort_values(["Date", "SecuritiesCode"]).reset_index(drop=True)
+
+    # For each time step, normalize across all stocks
+    for col in tqdm(feature_cols, desc="Cross-sectional normalizing"):
+        # Group by date and compute mean/std across all stocks for each date
+        date_stats = df.groupby("Date")[col].agg(['mean', 'std']).reset_index()
+        date_stats.columns = ['Date', f'{col}_mean', f'{col}_std']
+
+        # Merge stats back to original dataframe
+        df = df.merge(date_stats, on='Date', how='left')
+
+        # Fill missing std with 1 to avoid division by zero
+        df[f'{col}_std'] = df[f'{col}_std'].fillna(1.0)
+        df[f'{col}_std'] = df[f'{col}_std'].replace(0, 1.0)  # Replace 0 with 1
+        df[f'{col}_std'] = df[f'{col}_std'].clip(lower=eps)  # Ensure minimum value
+
+        # Normalize: (x - mean) / std
+        df[col] = (df[col] - df[f'{col}_mean']) / df[f'{col}_std']
+
+        # Clip extreme values
+        df[col] = df[col].clip(-10, 10)
+
+        # Drop temporary columns
+        df = df.drop(columns=[f'{col}_mean', f'{col}_std'])
+
+    log("Cross-sectional normalization completed.")
+    return df
+
+
 def create_sequences(df, feature_cols, seq_length=60, target_col="target_30d"):
     """
     Create sequences for LSTM from raw OHLCV data.
@@ -442,8 +634,8 @@ def create_sequences(df, feature_cols, seq_length=60, target_col="target_30d"):
         for i in range(seq_length, len(stock_data) - TARGET_HORIZON):
             seq_features = feature_values[i - seq_length:i]
 
-            # Target: 30-day forward return
-            target = target_values[i + TARGET_HORIZON]
+            # Target: 30-day forward return (target_30d is already a forward return, no need to add offset)
+            target = target_values[i]
 
             # Skip if any NaN in sequence or target
             if np.isnan(seq_features).any() or np.isnan(target):
@@ -470,6 +662,10 @@ def train_lstm_model(model, train_loader, epochs=10, lr=0.001):
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=epochs
+    )
 
     model.train()
     for epoch in range(epochs):
@@ -505,6 +701,7 @@ def train_lstm_model(model, train_loader, epochs=10, lr=0.001):
             total_loss += loss.item()
             num_batches += 1
 
+        scheduler.step()
         if num_batches > 0 and (epoch + 1) % 2 == 0:
             log(f"  Epoch {epoch+1}/{epochs}, Loss: {total_loss/num_batches:.6f}")
 
@@ -548,14 +745,22 @@ def calc_spread_return_sharpe(df: pd.DataFrame, portfolio_size: int = 200, topra
         Returns:
             (float): spread return
         """
+        # Handle case where we have fewer stocks than portfolio_size
+        actual_size = min(len(df), portfolio_size)
+        if actual_size < 10:  # Skip days with too few stocks
+            return 0.0
+
         assert df['Rank'].min() == 0
         assert df['Rank'].max() == len(df['Rank']) - 1
-        weights = np.linspace(start=toprank_weight_ratio, stop=1, num=portfolio_size)
-        purchase = (df.sort_values(by='Rank')['Target'][:portfolio_size] * weights).sum() / weights.mean()
-        short = (df.sort_values(by='Rank', ascending=False)['Target'][:portfolio_size] * weights).sum() / weights.mean()
+        weights = np.linspace(start=toprank_weight_ratio, stop=1, num=actual_size)
+        purchase = (df.sort_values(by='Rank')['Target'][:actual_size] * weights).sum() / weights.mean()
+        short = (df.sort_values(by='Rank', ascending=False)['Target'][:actual_size] * weights).sum() / weights.mean()
         return purchase - short
 
     buf = df.groupby('Date').apply(_calc_spread_return_per_day, portfolio_size, toprank_weight_ratio)
+    buf = buf[buf != 0]  # Remove zero entries
+    if len(buf) == 0:
+        return np.nan
     sharpe_ratio = buf.mean() / buf.std()
     return sharpe_ratio
 
@@ -596,28 +801,21 @@ def evaluate_portfolio_kaggle(pred_df, portfolio_size=200, toprank_weight_ratio=
 
 
 def evaluate_portfolio(pred_df):
-    """Evaluate portfolio performance - same as train.py."""
+    """Evaluate portfolio performance with daily rebalancing - aligned with itransformer_model.py."""
     if pred_df.empty:
         return {"num_days": 0, "sharpe": np.nan, "hit_ratio": np.nan, "spread": np.nan}
 
     pred_df = pred_df.sort_values("Date").reset_index(drop=True)
     dates = sorted(pred_df["Date"].unique())
 
-    # Monthly rebalancing dates (first trading day of each month)
-    monthly_dates = []
-    current_year_month = None
-    for d in dates:
-        dt = pd.to_datetime(d)
-        year_month = (dt.year, dt.month)
-        if year_month != current_year_month:
-            monthly_dates.append(d)
-            current_year_month = year_month
+    # Daily rebalancing (use all dates)
+    daily_dates = dates
 
     daily_results = []
     prev_top = set()
     prev_bottom = set()
 
-    for rebal_date in monthly_dates:
+    for rebal_date in daily_dates:
         day_pred = pred_df[pred_df["Date"] == rebal_date].copy()
         if len(day_pred) < TOP_K + BOTTOM_K:
             continue
@@ -656,7 +854,9 @@ def evaluate_portfolio(pred_df):
 
     avg_spread = daily_df["spread_after_cost"].mean()
     std_spread = daily_df["spread_after_cost"].std()
-    sharpe = (avg_spread / std_spread * np.sqrt(4)) if std_spread > 0 else np.nan
+
+    # Annualize with sqrt(252) for daily rebalancing
+    sharpe = (avg_spread / std_spread * np.sqrt(252)) if std_spread > 0 else np.nan
 
     return {
         "num_days": len(daily_df),
@@ -696,27 +896,13 @@ def predict_with_lstm(df, feature_cols, target_col):
     # 2. Filter by prediction year for train/test split
     # This avoids losing target values at year boundaries
 
-    # Step 1: Normalize using full training period (2017-2020) stats
-    log("Step 1: Computing normalization statistics...")
-    train_stats_df = df[(df["Year"] >= 2017) & (df["Year"] < 2021)].copy()
-    train_stats = {}
-    for col in feature_cols:
-        train_stats[col] = {
-            'mean': train_stats_df[col].mean(),
-            'std': train_stats_df[col].std()
-        }
+    # Step 1: Apply cross-sectional normalization across stocks at each time step
+    # This removes market-wide effects and focuses on relative differences between stocks
+    log("Step 1: Applying cross-sectional normalization (normalize across stocks at each time step)...")
+    df_norm = cross_sectional_normalize(df, feature_cols)
 
-    # Normalize ALL data using these stats
-    log("Step 2: Normalizing all data...")
-    df_norm = df.copy()
-    for col in feature_cols:
-        mean_val = train_stats[col]['mean']
-        std_val = train_stats[col]['std']
-        df_norm[col] = (df[col] - mean_val) / (std_val + 1e-8)
-        df_norm[col] = df_norm[col].clip(-10, 10)
-
-    # Step 3: Create sequences from ALL normalized data
-    log("Step 3: Creating sequences from all data...")
+    # Step 2: Create sequences from ALL normalized data
+    log("Step 2: Creating sequences from all data...")
     X, y, dates_arr, codes_arr = create_sequences(
         df_norm, feature_cols, seq_length=SEQ_LENGTH, target_col=target_col
     )
@@ -732,6 +918,118 @@ def predict_with_lstm(df, feature_cols, target_col):
     years = dates_pd.year
 
     pred_parts = []
+
+    # ======== 2018 Prediction (Validation) ========
+    log("Training for 2018 prediction...")
+    train_mask = years < 2018
+    test_mask = years == 2018
+
+    X_train = X[train_mask]
+    y_train = y[train_mask]
+    X_test = X[test_mask]
+    y_test = y[test_mask]
+    dates_test = dates_arr[test_mask]
+    codes_test = codes_arr[test_mask]
+
+    log(f"  2018: Train {len(X_train):,}, Test {len(X_test):,}")
+
+    if len(X_train) > 0 and len(X_test) > 0:
+        # Sample training data
+        max_train_samples = 300000
+        if len(X_train) > max_train_samples:
+            step = len(X_train) // max_train_samples
+            indices = np.arange(0, len(X_train), step)[:max_train_samples]
+            X_train_sampled = torch.FloatTensor(X_train[indices])
+            y_train_sampled = torch.FloatTensor(y_train[indices])
+        else:
+            X_train_sampled = torch.FloatTensor(X_train)
+            y_train_sampled = torch.FloatTensor(y_train)
+
+        # Train model
+        train_dataset = TensorDataset(X_train_sampled, y_train_sampled)
+        train_loader = DataLoader(train_dataset, batch_size=LSTM_BATCH_SIZE, shuffle=True, num_workers=0)
+
+        input_size = X_train.shape[2]
+        model = LSTMModel(
+            input_size=input_size,
+            hidden_size=LSTM_HIDDEN_SIZE,
+            num_layers=LSTM_NUM_LAYERS,
+            dropout=LSTM_DROPOUT
+        )
+        model = train_lstm_model(model, train_loader, epochs=LSTM_EPOCHS, lr=LSTM_LEARNING_RATE)
+
+        # Predict
+        test_dataset = TensorDataset(torch.FloatTensor(X_test))
+        test_loader = DataLoader(test_dataset, batch_size=LSTM_BATCH_SIZE, shuffle=False, num_workers=0)
+        pred = predict_lstm(model, test_loader)
+
+        out = pd.DataFrame({
+            "Date": dates_test,
+            "SecuritiesCode": codes_test,
+            "y_true": y_test,
+            "pred": pred,
+            "train_year": 2017
+        })
+        pred_parts.append(out)
+
+        del model
+        gc.collect()
+
+    # ======== 2019 Prediction (Validation) ========
+    log("Training for 2019 prediction...")
+    train_mask = years < 2019
+    test_mask = years == 2019
+
+    X_train = X[train_mask]
+    y_train = y[train_mask]
+    X_test = X[test_mask]
+    y_test = y[test_mask]
+    dates_test = dates_arr[test_mask]
+    codes_test = codes_arr[test_mask]
+
+    log(f"  2019: Train {len(X_train):,}, Test {len(X_test):,}")
+
+    if len(X_train) > 0 and len(X_test) > 0:
+        # Sample training data
+        max_train_samples = 300000
+        if len(X_train) > max_train_samples:
+            step = len(X_train) // max_train_samples
+            indices = np.arange(0, len(X_train), step)[:max_train_samples]
+            X_train_sampled = torch.FloatTensor(X_train[indices])
+            y_train_sampled = torch.FloatTensor(y_train[indices])
+        else:
+            X_train_sampled = torch.FloatTensor(X_train)
+            y_train_sampled = torch.FloatTensor(y_train)
+
+        # Train model
+        train_dataset = TensorDataset(X_train_sampled, y_train_sampled)
+        train_loader = DataLoader(train_dataset, batch_size=LSTM_BATCH_SIZE, shuffle=True, num_workers=0)
+
+        input_size = X_train.shape[2]
+        model = LSTMModel(
+            input_size=input_size,
+            hidden_size=LSTM_HIDDEN_SIZE,
+            num_layers=LSTM_NUM_LAYERS,
+            dropout=LSTM_DROPOUT
+        )
+        model = train_lstm_model(model, train_loader, epochs=LSTM_EPOCHS, lr=LSTM_LEARNING_RATE)
+
+        # Predict
+        test_dataset = TensorDataset(torch.FloatTensor(X_test))
+        test_loader = DataLoader(test_dataset, batch_size=LSTM_BATCH_SIZE, shuffle=False, num_workers=0)
+        pred = predict_lstm(model, test_loader)
+
+        out = pd.DataFrame({
+            "Date": dates_test,
+            "SecuritiesCode": codes_test,
+            "y_true": y_test,
+            "pred": pred,
+            "train_year": 2018
+        })
+        pred_parts.append(out)
+
+        del model
+        gc.collect()
 
     # ======== 2020 Prediction (Validation) ========
     log("Training for 2020 prediction...")
@@ -859,12 +1157,13 @@ def main():
     start_time = time.time()
 
     log("=" * 60)
-    log("JPX 30-Day Horizon - LSTM Model (Raw OHLCV Data)")
+    log("JPX 30-Day Horizon - LSTM Model (41 Engineered Features)")
     log(f"Configuration: seq_length={SEQ_LENGTH}, horizon={TARGET_HORIZON}")
-    log(f"Input: 60-day window of OHLCV (5 features)")
+    log(f"Input: 60-day window of {len(USE_FEATURES)} features")
     log("=" * 60)
 
-    # Load data
+    # Load dataset using load_dataset() - consistent with transformer.py
+    log("Loading dataset with engineered features...")
     data, feature_cols, target_col = load_dataset()
 
     # Run LSTM prediction
@@ -907,16 +1206,16 @@ def main():
     log(f"Kaggle Sharpe: {kaggle_metrics['kaggle_sharpe']:.4f}")
 
     # Print monthly breakdown
-    if "daily_df" in port_metrics and not port_metrics["daily_df"].empty:
-        daily_df = port_metrics["daily_df"]
-        log("\n" + "=" * 40)
-        log("MONTHLY SPREAD")
-        log("=" * 40)
-        daily_df["month"] = pd.to_datetime(daily_df["date"]).dt.strftime("%Y-%m")
-        for _, row in daily_df.iterrows():
-            log(f"  {row['month']}: Spread={row['spread']:+.4%}, Hit={row['hit_ratio']:.2%}")
-        positive_months = (daily_df["spread"] > 0).sum()
-        log(f"\nPositive months: {positive_months}/{len(daily_df)}")
+    # if "daily_df" in port_metrics and not port_metrics["daily_df"].empty:
+    #     daily_df = port_metrics["daily_df"]
+    #     log("\n" + "=" * 40)
+    #     log("MONTHLY SPREAD")
+    #     log("=" * 40)
+    #     daily_df["month"] = pd.to_datetime(daily_df["date"]).dt.strftime("%Y-%m")
+    #     for _, row in daily_df.iterrows():
+    #         log(f"  {row['month']}: Spread={row['spread']:+.4%}, Hit={row['hit_ratio']:.2%}")
+    #     positive_months = (daily_df["spread"] > 0).sum()
+    #     log(f"\nPositive months: {positive_months}/{len(daily_df)}")
 
     # Save metrics
     metrics = {**pred_metrics, **port_metrics, **kaggle_metrics}

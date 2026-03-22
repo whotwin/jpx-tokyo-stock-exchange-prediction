@@ -374,3 +374,140 @@ python itransformer_model.py
 如有问题或需要进一步优化，请参考：
 - 计划文件：`C:\Users\hty\.claude\plans\typed-watching-turing.md`
 - Kaggle 竞赛页面：https://www.kaggle.com/competitions/jpx-tokyo-stock-exchange-prediction
+
+---
+
+## 修改 2：数据格式修改 - stock ↔ stock attention
+
+**修改日期**：2026-03-09
+**修改目的**：改进 attention 机制，让模型学习 stock ↔ stock 关系
+
+---
+
+### 修改概述
+
+将数据格式从 2D 改为 4D，使 Transformer attention 学习 stock ↔ stock 关系而不是 (stock_feature) ↔ (stock_feature) 关系。
+
+**核心思想**：
+- 输入: (batch, seq_len, num_stocks, num_features)
+- 模型中: Linear(num_features → d_model) → (batch, seq_len, num_stocks, d_model)
+- Attention 在 num_stocks 维度上计算，学习 stock ↔ stock 关系
+
+---
+
+### 修改详情
+
+**文件**：`itransformer/data.py`
+**函数**：`create_itransformer_sequences()`
+
+**修改前**：
+```python
+# Stack: (seq_length, num_stocks, num_features)
+seq_features_stacked = np.stack(seq_features_list, axis=-1)
+
+# Reshape: (seq_length, num_stocks × num_features)
+seq_features = seq_features_stacked.reshape(seq_length, -1)
+```
+
+**修改后**：
+```python
+# Stack: (seq_length, num_stocks, num_features)
+# Keep 4D tensor: (seq_length, num_stocks, num_features)
+# NOT reshaping to 2D - attention will learn stock ↔ stock relationships
+seq_features = np.stack(seq_features_list, axis=-1)
+```
+
+**输出形状变化**：
+- 修改前: X = (samples, seq_length, num_stocks × num_features)
+- 修改后: X = (samples, seq_length, num_stocks, num_features)
+
+**额外返回**：
+- 返回 num_features 用于模型的 Linear(num_features → d_model) 投影
+
+---
+
+### 为什么这样修改
+
+**原来的问题**：
+- 把每个股票的每个特征当作独立的 variate
+- Attention 学习的是 (stock_feature) ↔ (stock_feature) 的关系
+- 无法直接捕捉股票之间的关系
+
+**改进后的优势**：
+- 每个股票的所有特征被投影到 d_model 维度
+- Attention 在 num_stocks 维度上计算
+- 直接学习 stock ↔ stock 之间的关系
+- 更符合金融市场的直觉：股票之间存在相关性
+
+---
+
+### 修改 3：使用投影层进行特征降维（2026-03-09）
+
+**文件**：`itransformer/train.py`, `itransformer/predict.py`
+
+**问题**：
+- iTransformer 模型期望 3D 输入 `(batch, seq_len, num_variates)`
+- 数据准备输出 4D 张量 `(batch, seq_len, num_stocks, num_features)`
+- 之前使用直接 reshape 导致维度不匹配
+
+**解决方案**：
+- 添加 `FeatureProjector` 类进行特征投影
+- 将 `num_features` 投影到 `d_model` 维度
+- 投影后 reshape 为 3D：`num_stocks * d_model`
+
+**实现细节**：
+
+1. **train.py** - 添加 FeatureProjector 类：
+```python
+class FeatureProjector(nn.Module):
+    def __init__(self, num_features, dim):
+        super().__init__()
+        self.projection = nn.Linear(num_features, dim)
+
+    def forward(self, x):
+        # x: (batch, seq_len, num_stocks, num_features)
+        batch, seq_len, num_stocks, num_features = x.shape
+        x = x.view(batch * seq_len, num_stocks, num_features)
+        x = self.projection(x)
+        x = x.view(batch, seq_len, num_stocks, -1)
+        return x
+```
+
+2. **修改 train_itransformer_model**：
+- 添加 `projector` 参数
+- 在模型调用前应用投影
+- 投影后 reshape 为 3D
+
+3. **修改 predict_itransformer**：
+- 添加 `projector` 参数
+- 在预测时也应用投影
+
+**数据流**：
+```
+输入: (batch, seq_len, num_stocks, num_features)
+  ↓ FeatureProjector
+中间: (batch, seq_len, num_stocks, d_model)
+  ↓ reshape
+输出: (batch, seq_len, num_stocks * d_model)
+  ↓ iTransformer
+预测: (batch, num_stocks * d_model)
+```
+
+---
+
+### 待完成
+
+1. 修改 `train.py` 中的 `cross_sectional_normalize` 函数以支持 4D 张量 ✅
+2. 修改 `predict.py` 中的模型调用以支持 4D 输入 ✅
+3. 添加 FeatureProjector 投影层 ✅
+4. 使用投影替代直接 reshape ✅
+
+---
+
+### 相关文件
+
+- `itransformer/data.py` - 已修改（输出 4D 张量）
+- `itransformer/train.py` - 已修改（FeatureProjector + cross_sectional_normalize 支持 4D）
+- `itransformer/predict.py` - 已修改（使用投影层）
+
+
