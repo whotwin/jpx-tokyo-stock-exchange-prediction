@@ -20,10 +20,10 @@ TARGET_COL = "Target"
 ID_COL = "SecuritiesCode"
 TIME_COL = "Quarter"
 
-TRAIN_FILE = r"C:\Users\DELL\Desktop\SemB\6423\GP\train_dataset_clean.csv"
-TEST_FILE = r"C:\Users\DELL\Desktop\SemB\6423\GP\test_dataset.csv"
+TRAIN_FILE = r"cleaned_data\train_dataset_clean.csv"
+TEST_FILE = r"cleaned_data\test_dataset.csv"
 
-SAVE_DIR = r"C:\Users\DELL\Desktop\SemB\6423\GP\lstm_final_outputs"
+SAVE_DIR = r".\lstm_final_outputs"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -293,46 +293,46 @@ def evaluate_signal(df, signal_col, save_prefix):
     for quarter, group in df.groupby(TIME_COL):
         group = group.sort_values("PredRank").reset_index(drop=True)
 
-        top200 = group.head(200).copy()
-        bottom200 = group.tail(200).copy()
+        top20 = group.head(20).copy()
+        bottom20 = group.tail(20).copy()
 
-        top_list.append(top200)
-        bottom_list.append(bottom200)
+        top_list.append(top20)
+        bottom_list.append(bottom20)
 
         if group[signal_col].nunique() > 1 and group["y_true"].nunique() > 1:
             rank_ic = spearmanr(group[signal_col], group["y_true"])[0]
         else:
             rank_ic = np.nan
 
-        top_avg = top200["y_true"].mean()
-        bottom_avg = bottom200["y_true"].mean()
+        top_avg = top20["y_true"].mean()
+        bottom_avg = bottom20["y_true"].mean()
         long_short = top_avg - bottom_avg
 
         rankic_rows.append({
             "Quarter": quarter,
             "NumStocks": len(group),
             "RankIC": rank_ic,
-            "Top200AvgTrue": top_avg,
-            "Bottom200AvgTrue": bottom_avg,
+            "Top20AvgTrue": top_avg,
+            "Bottom20AvgTrue": bottom_avg,
             "LongShortSpread": long_short
         })
 
         print(
             str(quarter.date()),
             "| RankIC =", round(rank_ic, 6),
-            "| Top200Avg =", round(top_avg, 6),
-            "| Bottom200Avg =", round(bottom_avg, 6),
+            "| Top20Avg =", round(top_avg, 6),
+            "| Bottom20Avg =", round(bottom_avg, 6),
             "| LongShort =", round(long_short, 6)
         )
 
     rankic_df = pd.DataFrame(rankic_rows)
-    top200_df = pd.concat(top_list, ignore_index=True)
-    bottom200_df = pd.concat(bottom_list, ignore_index=True)
+    top20_df = pd.concat(top_list, ignore_index=True)
+    bottom20_df = pd.concat(bottom_list, ignore_index=True)
 
     df.to_csv(os.path.join(SAVE_DIR, f"{save_prefix}_ranking.csv"), index=False)
     rankic_df.to_csv(os.path.join(SAVE_DIR, f"{save_prefix}_rankic.csv"), index=False)
-    top200_df.to_csv(os.path.join(SAVE_DIR, f"{save_prefix}_top200.csv"), index=False)
-    bottom200_df.to_csv(os.path.join(SAVE_DIR, f"{save_prefix}_bottom200.csv"), index=False)
+    top20_df.to_csv(os.path.join(SAVE_DIR, f"{save_prefix}_top20.csv"), index=False)
+    bottom20_df.to_csv(os.path.join(SAVE_DIR, f"{save_prefix}_bottom20.csv"), index=False)
 
     if df[signal_col].nunique() > 1 and df["y_true"].nunique() > 1:
         overall_rankic = spearmanr(df[signal_col], df["y_true"])[0]

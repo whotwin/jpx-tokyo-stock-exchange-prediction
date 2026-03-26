@@ -3,7 +3,7 @@
 from .config import log, OUTPUT_DIR, PLOT_DIR
 from .data import load_cleaned_data, prepare_data
 from .model import fit_lgbm, predict_lgbm
-from .predict import predict_with_lgbm, evaluate_signal
+from .predict import predict_with_lgbm_gridsearch, predict_2021_final, run_with_shap
 
 __all__ = [
     "log",
@@ -13,6 +13,7 @@ __all__ = [
     "prepare_data",
     "fit_lgbm",
     "predict_lgbm",
-    "predict_with_lgbm",
-    "evaluate_signal",
+    "predict_with_lgbm_gridsearch",
+    "predict_2021_final",
+    "run_with_shap",
 ]

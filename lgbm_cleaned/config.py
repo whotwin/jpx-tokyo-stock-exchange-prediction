@@ -27,7 +27,7 @@ SLIPPAGE_RATE = 0.0002
 USE_GPU = os.environ.get("CUDA_VISIBLE_DEVICES", "") != ""
 
 # Validation years (consistent with lstm_gridsearch_cmd1.py)
-VAL_YEARS = [2018, 2019, 2020, 2021]
+VAL_YEARS = [2018, 2019, 2020]
 
 # LGBM default hyperparameters (will be tuned)
 LGBM_PARAMS = {

@@ -22,10 +22,10 @@ TARGET_COL = "Target"
 ID_COL = "SecuritiesCode"
 TIME_COL = "Quarter"
 
-TRAIN_FILE = r"C:\Users\DELL\Desktop\SemB\6423\GP\train_dataset_clean.csv"
-TEST_FILE  = r"C:\Users\DELL\Desktop\SemB\6423\GP\test_dataset.csv"
+TRAIN_FILE = r"cleaned_data\train_dataset_clean.csv"
+TEST_FILE  = r"cleaned_data\test_dataset.csv"
 
-SAVE_DIR = r"C:\Users\DELL\Desktop\SemB\6423\GP\lstm_quant_outputs"
+SAVE_DIR = r"lstm_quant_outputs"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
